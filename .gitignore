@@ -1,1 +1,56 @@
+# Dependencies
+/node_modules/
+/client/node_modules/
+/server/node_modules/
+
+# Build Outputs
+/build/
+/client/build/
+/server/build/ # If your server has a build step (e.g., TypeScript)
+/dist/
+/client/dist/
+/server/dist/ # If your server has a build step
+
+# Environment Variables - CRITICAL FOR SECURITY
+# These should contain secrets and sensitive configurations
 .env
+*.env
+.env.*
+client/.env
+client/.env.local
+client/.env.development.local
+client/.env.test.local
+client/.env.production.local
+server/.env
+server/config.env # If you use this name
+
+# Log files
+logs/
+*.log
+npm-debug.log*
+
+
+pnpm-debug.log*
+
+# OS-generated files
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# IDE and Editor specific files
+.idea/
+.vscode/
+*.sublime-project
+*.sublime-workspace
+*.project
+*.tmproj
+*.code-workspace
+
+# Coverage output
+/coverage/
+/.nyc_output/
+
