@@ -2,6 +2,7 @@
 
 
 Video Demo Link :** https://youtu.be/8IEDuQBC4Xw
+[![Deploy to Render](https://render.com/images/deploy-to-render-button.svg)](https://student-progress-ui.onrender.com)
 
 A comprehensive MERN stack application designed to track and manage student progress on the Codeforces competitive programming platform. This system allows administrators or mentors to monitor contest performance, analyze problem-solving data, and automate reminders for inactivity. It features a dynamic data synchronization mechanism with Codeforces and a role-based authentication system.
 
