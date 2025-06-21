@@ -13,13 +13,13 @@ import {
   TableHead,
   TableRow,
   Link as MuiLink,
-  Tooltip // <-- IMPORT Tooltip
+  Tooltip,
+  CircularProgress
 } from '@mui/material';
 import { subDays, fromUnixTime, format as formatDate } from 'date-fns';
-
 import RatingGraph from './RatingGraph';
 
-const ContestHistory = ({ contests }) => {
+const ContestHistory = ({ contests, studentOverallSyncStatus }) => {
   const [timeFilter, setTimeFilter] = useState('all');
 
   const handleTimeFilterChange = (event, newFilter) => {
@@ -34,26 +34,35 @@ const ContestHistory = ({ contests }) => {
     }
     const now = new Date();
     let startDate;
+    // Default to all, sort by most recent
+    let anArrayOfContests = [...contests].sort((a, b) => b.ratingUpdatedAtSeconds - a.ratingUpdatedAtSeconds);
+
     switch (timeFilter) {
-      case '30d': startDate = subDays(now, 30); break;
-      case '90d': startDate = subDays(now, 90); break;
-      case '365d': startDate = subDays(now, 365); break;
-      default: /* 'all' */
-        return [...contests].sort((a, b) => b.ratingUpdatedAtSeconds - a.ratingUpdatedAtSeconds);
+      case '30d':
+        startDate = subDays(now, 30);
+        return anArrayOfContests.filter(contest => fromUnixTime(contest.ratingUpdatedAtSeconds) >= startDate);
+      case '90d':
+        startDate = subDays(now, 90);
+        return anArrayOfContests.filter(contest => fromUnixTime(contest.ratingUpdatedAtSeconds) >= startDate);
+      case '365d':
+        startDate = subDays(now, 365);
+        return anArrayOfContests.filter(contest => fromUnixTime(contest.ratingUpdatedAtSeconds) >= startDate);
+      case 'all':
+      default:
+        return anArrayOfContests; // Already sorted
     }
-    return contests
-      .filter(contest => fromUnixTime(contest.ratingUpdatedAtSeconds) >= startDate)
-      .sort((a, b) => b.ratingUpdatedAtSeconds - a.ratingUpdatedAtSeconds);
   }, [contests, timeFilter]);
 
   const ratingHistoryDataForGraph = useMemo(() => {
     if (!filteredContests || filteredContests.length === 0) return [];
-    return [...filteredContests].reverse().map(contest => ({
+    return [...filteredContests].reverse().map(contest => ({ // Reverse for chronological order for graph
         time: contest.ratingUpdatedAtSeconds * 1000,
         rating: contest.newRating,
         name: contest.contestName,
     }));
   }, [filteredContests]);
+
+  const isLoadingContestList = studentOverallSyncStatus === 'pending' && (!contests || contests.length === 0);
 
   return (
     <Paper elevation={2} sx={{ p: { xs: 1, sm: 2 }, mt: 3 }}>
@@ -76,51 +85,68 @@ const ContestHistory = ({ contests }) => {
         </ToggleButtonGroup>
       </Box>
 
-      <Box sx={{ mb: 3, width: '100%', minHeight: 300 }}>
-        <RatingGraph data={ratingHistoryDataForGraph} />
+      <Box sx={{ mb: 3, width: '100%', minHeight: 300, display: 'flex', justifyContent: 'center', alignItems: 'center' }}>
+        {isLoadingContestList ? (
+          <>
+            <CircularProgress size={30} sx={{mr:1}}/> 
+            <Typography color="text.secondary">Loading rating graph data...</Typography>
+          </>
+        ) : ratingHistoryDataForGraph.length > 0 ? (
+          <RatingGraph data={ratingHistoryDataForGraph} />
+        ) : (
+          <Typography color="text.secondary">No rating data available for the selected period.</Typography>
+        )}
       </Box>
 
       <Typography variant="h6" gutterBottom component="h3" sx={{mt: 2}}>
-        Contest Details ({filteredContests.length})
+        Contest Details ({isLoadingContestList ? 'loading...' : filteredContests.length})
       </Typography>
-      {filteredContests.length > 0 ? (
+
+      {isLoadingContestList ? (
+        <Box sx={{display: 'flex', justifyContent: 'center', alignItems: 'center', minHeight: '100px'}}>
+            <CircularProgress size={30} sx={{mr:1}} /> <Typography color="text.secondary">Loading contest list...</Typography>
+        </Box>
+      ) : filteredContests.length > 0 ? (
         <TableContainer component={Paper} variant="outlined">
           <Table size="small" aria-label="contest history table">
             <TableHead sx={{ backgroundColor: (theme) => theme.palette.mode === 'dark' ? 'grey.700' : 'grey.100' }}>
               <TableRow>
-                <TableCell sx={{ width: '15%' }}>Date</TableCell>
-                <TableCell sx={{ width: '30%' }}>Contest Name</TableCell> {/* Adjusted width */}
-                <TableCell align="right" sx={{ width: '10%' }}>Rank</TableCell>
-                {/* --- NEW COLUMN HEADER --- */}
-                <TableCell align="center" sx={{ width: '15%', whiteSpace: 'nowrap' }}>Problems Solved</TableCell>
-                <TableCell align="right" sx={{ width: '10%' }}>Old Rating</TableCell>
-                <TableCell align="right" sx={{ width: '10%' }}>New Rating</TableCell>
-                <TableCell align="right" sx={{ width: '10%' }}>Change</TableCell> {/* Adjusted width */}
+                <TableCell sx={{ width: '15%', py: 1 }}>Date</TableCell>
+                <TableCell sx={{ width: '30%', py: 1 }}>Contest Name</TableCell>
+                <TableCell align="right" sx={{ width: '10%', py: 1 }}>Rank</TableCell>
+                <TableCell align="center" sx={{ width: '15%', whiteSpace: 'nowrap', py: 1 }}>Problems Solved</TableCell>
+                <TableCell align="right" sx={{ width: '10%', py: 1 }}>Old Rating</TableCell>
+                <TableCell align="right" sx={{ width: '10%', py: 1 }}>New Rating</TableCell>
+                <TableCell align="right" sx={{ width: '10%', py: 1 }}>Change</TableCell>
               </TableRow>
             </TableHead>
             <TableBody>
               {filteredContests.map((contest) => {
-                // Gracefully handle potentially missing problem count data
-                const solved = contest.problemsSolvedByUser !== undefined ? contest.problemsSolvedByUser : '-';
-                const total = contest.totalProblemsInContest !== undefined && contest.totalProblemsInContest > 0 
-                              ? contest.totalProblemsInContest 
-                              : (solved !== '-' ? '-' : ''); // If solved is a number but total is 0/undefined, show '-' for total. If solved is '-', total can be empty.
+                const isDetailsSynced = contest.contestDetailsSynced === true;
                 
-                let unsolvedText = "Problem count data unavailable";
-                if (typeof solved === 'number' && typeof total === 'number' && total > 0) {
-                  unsolvedText = `${total - solved} unsolved`;
-                } else if (solved !== '-' && total === '-') {
-                   // If we know solved but not total (less likely with new backend logic but defensive)
-                   unsolvedText = "Total problems unknown";
-                }
+                let displayValue = "-/-";
+                let tooltipTitle = "Problem count data unavailable or not yet synced.";
 
+                if (isDetailsSynced) {
+                  const solved = contest.problemsSolvedByUser !== undefined ? contest.problemsSolvedByUser : 0;
+                  const total = contest.totalProblemsInContest !== undefined && contest.totalProblemsInContest > 0 
+                                ? contest.totalProblemsInContest 
+                                : 0;
+                  
+                  displayValue = `${solved}/${total || '-'}`;
+                  if (total > 0) {
+                     tooltipTitle = `${total - solved} unsolved`;
+                  } else if (total === 0 && solved === 0 && isDetailsSynced) {
+                     tooltipTitle = "No problems listed for this contest or data issue.";
+                  } else {
+                     tooltipTitle = "Problem count data appears incomplete.";
+                  }
+                }
 
                 return (
                   <TableRow key={contest.contestId + '-' + contest.ratingUpdatedAtSeconds} sx={{ '&:hover': { backgroundColor: 'action.hover' }}}>
-                    <TableCell>
-                      {formatDate(fromUnixTime(contest.ratingUpdatedAtSeconds), 'MMM d, yyyy')}
-                    </TableCell>
-                    <TableCell>
+                    <TableCell sx={{py: 0.5}}>{formatDate(fromUnixTime(contest.ratingUpdatedAtSeconds), 'MMM d, yyyy')}</TableCell>
+                    <TableCell sx={{py: 0.5}}>
                       <MuiLink
                           href={`https://codeforces.com/contest/${contest.contestId}`}
                           target="_blank"
@@ -130,20 +156,30 @@ const ContestHistory = ({ contests }) => {
                           {contest.contestName}
                       </MuiLink>
                     </TableCell>
-                    <TableCell align="right">{contest.rank}</TableCell>
-                    {/* --- NEW CELL FOR DISPLAYING SOLVED/TOTAL --- */}
-                    <TableCell align="center">
-                      <Tooltip title={unsolvedText} placement="top">
-                        <span> {/* Tooltip needs a child that can accept ref, span works */}
-                          {`${solved}${total !== '' ? '/' + total : ''}`}
-                        </span>
-                      </Tooltip>
+                    <TableCell align="right" sx={{py: 0.5}}>{contest.rank}</TableCell>
+                    <TableCell align="center" sx={{py: 0.5}}>
+                      {!isDetailsSynced && studentOverallSyncStatus === 'pending' ? (
+                        <Tooltip title="Syncing problem counts..." placement="top">
+                           <Box component="span" sx={{ display: 'inline-flex', alignItems: 'center' }}>
+                                <CircularProgress size={16} sx={{ verticalAlign: 'middle' }} />
+                           </Box>
+                        </Tooltip>
+                      ) : !isDetailsSynced ? (
+                        <Tooltip title="Problem counts not yet synced." placement="top">
+                           <span>-/-</span>
+                        </Tooltip>
+                      ) : (
+                        <Tooltip title={tooltipTitle} placement="top">
+                          <span>{displayValue}</span>
+                        </Tooltip>
+                      )}
                     </TableCell>
-                    <TableCell align="right">{contest.oldRating}</TableCell>
-                    <TableCell align="right">{contest.newRating}</TableCell>
+                    <TableCell align="right" sx={{py: 0.5}}>{contest.oldRating}</TableCell>
+                    <TableCell align="right" sx={{py: 0.5}}>{contest.newRating}</TableCell>
                     <TableCell
                       align="right"
                       sx={{
+                        py: 0.5,
                         color: contest.newRating - contest.oldRating >= 0
                           ? (contest.newRating - contest.oldRating > 0 ? 'success.main' : 'text.primary')
                           : 'error.main',

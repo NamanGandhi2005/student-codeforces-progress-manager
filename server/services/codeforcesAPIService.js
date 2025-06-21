@@ -174,55 +174,48 @@ async function fetchContestStandingsData(contestId, handle) {
 }
 
 // --- Main Sync Function ---
+
+
 async function fetchAndSaveStudentCFData(handle) {
     console.log(`[CF_SERVICE] Starting FULL CF data sync for handle: ${handle}`);
-    const student = await Student.findOne({ codeforcesHandle: handle });
+    let student = await Student.findOne({ codeforcesHandle: handle }); // Get initial student doc
+
     if (!student) {
         console.error(`[CF_SERVICE_ERROR] Student with handle ${handle} not found in DB. Cannot sync.`);
-        // Consider if this should throw or just return null for the controller to handle
         throw new Error(`Student with handle ${handle} not found in DB.`);
     }
 
     try {
-        await Student.updateOne({ _id: student._id }, { syncStatus: 'pending', syncErrorMessage: null });
+        // Mark sync as pending initially
+        student.syncStatus = 'pending';
+        student.syncErrorMessage = null;
+        // student.lastSyncedAt = new Date(); // Or update this only at the very end
+        await student.save(); // Save pending status
 
         // These calls will now throw more reliably if they fail to get proper data
-        const userInfo = await fetchUserInfo(handle); // Must return valid user object or throw
-        const ratingHistory = await fetchUserRatingHistory(handle); // Must return array or throw
-        const submissionsData = await fetchUserSubmissions(handle); // Must return array or throw
+        const userInfo = await fetchUserInfo(handle);
+        const ratingHistoryFromAPI = await fetchUserRatingHistory(handle); // Fresh contest list from API
+        const submissionsData = await fetchUserSubmissions(handle);
 
-        // If we reach here, userInfo, ratingHistory, and submissionsData are guaranteed to be valid (not undefined)
+        // Update basic info from userInfo
         student.currentRating = userInfo.rating || 0;
         student.maxRating = userInfo.maxRating || 0;
 
-        const processedContests = [];
-        if (ratingHistory && ratingHistory.length > 0) {
-            for (const contestAPIData of ratingHistory) {
-                const existingContestEntry = student.codeforcesData.contests.find(
-                    c => c.contestId === contestAPIData.contestId && c.ratingUpdatedAtSeconds === contestAPIData.ratingUpdateTimeSeconds
-                );
-                
-                let problemsSolvedByUser = existingContestEntry?.problemsSolvedByUser || 0;
-                let totalProblemsInContest = existingContestEntry?.totalProblemsInContest || 0;
-                let detailsSyncedInLoop = existingContestEntry?.contestDetailsSynced || false; // Use a distinct name for clarity
+        // --- Process Contests: Merge API data with existing DB data and save progressively ---
+        // First, ensure the student.codeforcesData.contests array reflects all contests from ratingHistoryFromAPI
+        // This is a simplified merge: assumes ratingHistoryFromAPI is the source of truth for the list of contest participations.
+        // More complex merging would be needed if contests could be removed or if details other than problem counts change.
+        
+        const contestMapFromDB = new Map(student.codeforcesData.contests.map(c => [`${c.contestId}-${c.ratingUpdatedAtSeconds}`, c]));
+        const newContestArray = [];
+        let basicContestListChanged = false;
 
-                if (CF_KEY && CF_SECRET && !detailsSyncedInLoop) {
-                    console.log(`[CF_SERVICE_INFO] Fetching standings & problem data for contest ${contestAPIData.contestId} (user: ${handle})`);
-                    const standingsFullData = await fetchContestStandingsData(contestAPIData.contestId, handle);
+        if (ratingHistoryFromAPI && ratingHistoryFromAPI.length > 0) {
+            for (const contestAPIData of ratingHistoryFromAPI) {
+                const key = `${contestAPIData.contestId}-${contestAPIData.ratingUpdatedAtSeconds}`;
+                const existingDBEntry = contestMapFromDB.get(key);
 
-                    if (standingsFullData && standingsFullData.problems) {
-                        totalProblemsInContest = standingsFullData.problems.length;
-                    }
-                    if (standingsFullData && standingsFullData.rows && standingsFullData.rows.length > 0) {
-                        const userStandingsRow = standingsFullData.rows[0];
-                        if (userStandingsRow.problemResults) {
-                             problemsSolvedByUser = userStandingsRow.problemResults.filter(pr => pr.points > 0 || (pr.bestSubmissionTimeSeconds !== undefined && pr.bestSubmissionTimeSeconds !== null)).length;
-                        }
-                    }
-                    detailsSyncedInLoop = true; // Mark as attempted/synced for this iteration
-                }
-
-                processedContests.push({
+                newContestArray.push({
                     contestId: contestAPIData.contestId,
                     contestName: contestAPIData.contestName,
                     handle: contestAPIData.handle,
@@ -230,35 +223,85 @@ async function fetchAndSaveStudentCFData(handle) {
                     oldRating: contestAPIData.oldRating,
                     newRating: contestAPIData.newRating,
                     ratingUpdatedAtSeconds: contestAPIData.ratingUpdateTimeSeconds,
-                    problemsSolvedByUser: problemsSolvedByUser,
-                    totalProblemsInContest: totalProblemsInContest,
-                    contestDetailsSynced: detailsSyncedInLoop // Use the loop's flag
+                    // Preserve existing details if present, otherwise default
+                    problemsSolvedByUser: existingDBEntry?.problemsSolvedByUser || 0,
+                    totalProblemsInContest: existingDBEntry?.totalProblemsInContest || 0,
+                    contestDetailsSynced: existingDBEntry?.contestDetailsSynced || false,
                 });
+                if (!existingDBEntry) basicContestListChanged = true; // A new contest participation was added
             }
         }
-        student.codeforcesData.contests = processedContests.sort((a, b) => b.ratingUpdatedAtSeconds - a.ratingUpdatedAtSeconds);
+        
+        // If the structure of the contest list changed (e.g., new contests added)
+        if (basicContestListChanged || student.codeforcesData.contests.length !== newContestArray.length) {
+            student.codeforcesData.contests = newContestArray.sort((a, b) => b.ratingUpdatedAtSeconds - a.ratingUpdatedAtSeconds);
+            student.markModified('codeforcesData.contests');
+        }
+        // Save submissions once
         student.codeforcesData.submissions = submissionsData.sort((a,b) => b.creationTimeSeconds - b.creationTimeSeconds);
+        student.markModified('codeforcesData.submissions');
 
         if (student.codeforcesData.submissions.length > 0) {
             student.lastSubmissionTimestampSeconds = student.codeforcesData.submissions[0].creationTimeSeconds;
         } else {
             student.lastSubmissionTimestampSeconds = null;
         }
+
+        // Save after updating basic info, contest shells, and all submissions
+        // This makes the initial list of contests available to the frontend poll
+        await student.save();
+        console.log(`[CF_SERVICE_INFO] Saved initial data & contest shells for ${handle}. Now fetching contest details.`);
+
+        // Now, iterate through the student's contests (which are now up-to-date with shells)
+        // and fetch details if needed, saving after each successful detail fetch.
+        if (CF_KEY && CF_SECRET) {
+            for (let i = 0; i < student.codeforcesData.contests.length; i++) {
+                let contestEntry = student.codeforcesData.contests[i]; // This is a subdocument reference
+
+                if (!contestEntry.contestDetailsSynced) {
+                    console.log(`[CF_SERVICE_INFO] Fetching details for contest ${contestEntry.contestId} (user: ${handle})`);
+                    const standingsFullData = await fetchContestStandingsData(contestEntry.contestId, handle);
+
+                    if (standingsFullData) {
+                        if (standingsFullData.problems) {
+                            contestEntry.totalProblemsInContest = standingsFullData.problems.length;
+                        }
+                        if (standingsFullData.rows && standingsFullData.rows.length > 0) {
+                            const userRow = standingsFullData.rows[0];
+                            if (userRow.problemResults) {
+                                contestEntry.problemsSolvedByUser = userRow.problemResults.filter(pr => pr.points > 0 || (pr.bestSubmissionTimeSeconds != null)).length;
+                            }
+                        }
+                        contestEntry.contestDetailsSynced = true;
+                        console.log(`[CF_SERVICE_DEBUG] Contest ${contestEntry.contestId} details updated: S/T: ${contestEntry.problemsSolvedByUser}/${contestEntry.totalProblemsInContest}`);
+                        
+                        // Save after updating this contest's details to make it visible to polling frontend
+                        student.markModified(`codeforcesData.contests.${i}`); 
+                        await student.save();
+                        console.log(`[CF_SERVICE_DEBUG] Saved progress after contest ${contestEntry.contestId}`);
+                    } else {
+                        console.warn(`[CF_SERVICE_WARN] No standings data for contest ${contestEntry.contestId}. Details not updated for this attempt.`);
+                        // contestDetailsSynced remains false, will be retried next time
+                    }
+                }
+            }
+        }
+        
+        // Final update for overall status and lastSyncedAt
         student.lastSyncedAt = new Date();
         student.syncStatus = 'success';
         student.syncErrorMessage = null;
-
-        await student.save();
-        console.log(`[CF_SERVICE_INFO] Successfully synced and saved CF data for ${handle}. Processed ${processedContests.length} contests.`);
-        return student;
+        await student.save(); // Final save
+        console.log(`[CF_SERVICE_INFO] Successfully completed FULL CF data sync for ${handle}.`);
+        return student; // Return the fully updated student
 
     } catch (error) {
         console.error(`[CF_SERVICE_ERROR] CRITICAL Error during CF data sync for ${handle}: ${error.message}`, error.stack);
-        // Attempt to update student status to 'failed' even if other parts of the sync failed
         try {
-            const studentToUpdateOnError = await Student.findById(student._id); // Use findById if student object might be stale
+            // Re-fetch student to avoid saving potentially partially modified state from within the try block
+            const studentToUpdateOnError = await Student.findOne({ codeforcesHandle: handle });
             if (studentToUpdateOnError) {
-                studentToUpdateOnError.lastSyncedAt = new Date();
+                studentToUpdateOnError.lastSyncedAt = new Date(); // Mark sync attempt time
                 studentToUpdateOnError.syncStatus = 'failed';
                 studentToUpdateOnError.syncErrorMessage = error.message.substring(0, 500);
                 await studentToUpdateOnError.save();
@@ -266,7 +309,7 @@ async function fetchAndSaveStudentCFData(handle) {
         } catch (saveError) {
             console.error(`[CF_SERVICE_ERROR] Failed to update student sync status to 'failed' for ${handle}: ${saveError.message}`);
         }
-        throw error; // Re-throw original error so the caller (e.g., controller) knows about the failure
+        throw error;
     }
 }
 
